@@ -129,20 +129,21 @@ class PeakTest(ScimapTestCase):
 
     def test_peak_fit(self):
         """This particular peak was not fit properly. Let's see why."""
-        peak = XRDPeak(reflection=Reflection('110', (37, 39)), method="gaussian")
+        peak = XRDPeak(reflection=Reflection('110', (2.59, 2.72)), method="gaussian")
         peakScan = XRDScan('test-data-xrd/corundum.xye',
                            phase=Corundum())
         df = peakScan.diffractogram
         bg = peakScan.refinement.refine_background(
             scattering_lengths=df.index,
-            intensities=df['counts'].values
+            intensities=df['intensities'].values
         )
-        peak.fit(x=df.index, y=df['counts'].values - bg)
-        import matplotlib.pyplot as plt
-        plt.plot(df.index, df['counts'].values - bg)
-        plt.show()
+        peak.fit(x=df.index, y=df['intensities'].values - bg)
+        # import matplotlib.pyplot as plt
+        # plt.plot(df.index, df['intensities'].values - bg)
+        # plt.show()
         fit_kalpha1 = peak.fit_list[0]
         fit_kalpha2 = peak.fit_list[1]
+        print(fit_kalpha1.parameters)
         self.assertApproximatelyEqual(
             fit_kalpha1.parameters,
             fit_kalpha1.Parameters(height=30.133, center=37.774, width=0.023978)
@@ -483,38 +484,39 @@ class XRDScanTest(ScimapTestCase):
                                 phase=Corundum)
 
     def test_remove_peak_from_df(self):
-        xrd_scan = XRDScan(filename='test-data-xrd/map-0.plt')
-        peakRange = (35, 40)
-        df = xrd_scan.diffractogram
-        peakIndex = df[peakRange[0]:peakRange[1]].index
-        remove_peak_from_df(Reflection('000', peakRange), df)
-        intersection = df.index.intersection(peakIndex)
+        xrd_scan = XRDScan(filename=corundum_path)
+        peakRange = (2, 3)
+        q = xrd_scan.scattering_lengths
+        # peakIndex = df[peakRange[0]:peakRange[1]].index
+        newq, intensities = remove_peak_from_df(x=q,
+                                                y=xrd_scan.intensities,
+                                                xrange=peakRange)
         self.assertEqual(
-            len(intersection),
-            0,
-            'Peak not removed ({0} remaining)'.format(len(intersection))
+            len(newq),
+            5404,
+            'Expected new pattern to have length 5404 (got {})'.format(len(newq))
         )
-
-    def test_filetypes(self):
-        # Can the class determine the filetype and load it appropriately
-        XRDScan(filename=corundum_path)
+        self.assertEqual(
+            len(newq),
+            len(intensities),
+            'x and y are not the same length ({} vs {})'.format(len(newq), len(intensities)),
+        )
 
     def test_contains_peak(self):
         """Method for determining if a given two_theta
         range is within the limits of the index."""
-        x = self.xrd_scan.diffractogram.index
-        y = self.xrd_scan.diffractogram['counts'].values
+        x = self.xrd_scan.scattering_lengths
         # Completely inside range
-        self.assertTrue(native.contains_peak(
-            scattering_lengths=x, qrange=(20, 23))
+        self.assertTrue(
+            native.contains_peak(scattering_lengths=x, qrange=(1, 2))
         )
         # Completely outside range
         self.assertFalse(
-            native.contains_peak(scattering_lengths=x, qrange=(2, 3))
+            native.contains_peak(scattering_lengths=x, qrange=(0.2, 0.3))
         )
         # Partial overlap
         self.assertTrue(
-            native.contains_peak(scattering_lengths=x, qrange=(79, 81))
+            native.contains_peak(scattering_lengths=x, qrange=(5, 6))
         )
 
 
