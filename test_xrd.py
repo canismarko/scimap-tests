@@ -28,9 +28,10 @@ if __name__ == '__main__':
     import matplotlib
     matplotlib.use('Agg')
 from matplotlib import colors
+import numpy as np
 
 from scimap import exceptions
-from peakfitting import PeakFit, remove_peak_from_df
+from peakfitting import PeakFit, remove_peak_from_df, discrete_fwhm
 from cases import ScimapTestCase
 from xrd.lmo import CubicLMO
 from xrd.nca import NCA
@@ -49,7 +50,7 @@ from xrd.adapters import BrukerRawFile, BrukerBrmlFile, BrukerXyeFile
 
 corundum_path = os.path.join(
     os.path.dirname(__file__),
-    'test-data-xrd/corundum.xye'
+    'test-data-xrd/corundum.brml'
 )
 
 hdf_34IDE = os.path.join(
@@ -92,12 +93,30 @@ class PeakTest(ScimapTestCase):
             [(1, 2, 3), (4, 5, 6)]
         )
 
+    def gaussian_curve(self, height=1, center=0, fwhm=1):
+        x = np.linspace(-5, 5, num=500)
+        a = height
+        b = center
+        c = fwhm / (2*math.sqrt(2*math.log(2)))
+        y = a * np.exp(-(x-b)**2/(2*c**2))
+        return x, y
+
+    def test_discrete_fwhm(self):
+        """This test checks that the full-width half-max is properly
+        approximated."""
+        expected_fwhm = 1
+        # Construct a Gaussian curve
+        x, y = self.gaussian_curve(fwhm=expected_fwhm)
+        # Calculate FWHM
+        fwhm = discrete_fwhm(x, y)
+        self.assertApproximatelyEqual(fwhm, expected_fwhm, tolerance=0.1)
+
     def test_initial_parameters(self):
         # Does the class guess reasonable starting values for peak fitting
         peakScan = XRDScan(corundum_path, phase=Corundum())
-        df = peakScan.diffractogram[34:36]
+        df = peakScan.diffractogram[2.38:2.52]
         peak = XRDPeak(method="gaussian")
-        guess = peak.guess_parameters(data=df.counts)
+        guess = peak.guess_parameters(x=df.index, y=df.counts.values)
         # Should be two peaks present
         self.assertEqual(len(guess), 2)
         tolerance = 0.001
@@ -308,6 +327,23 @@ class NativeRefinementTest(ScimapTestCase):
             hkl_list,
             [reflection.hkl_string for reflection in Corundum.reflection_list]
         )
+
+
+class Refinement34IDETest(ScimapTestCase):
+    """Tests that check for proper functioning of refinement with sample
+    data from APS 34-ID-C beamline."""
+    def setUp(self):
+        self.map_ = XRDMap(hdf_filename=hdf_34IDE,
+                           sample_name=group_34IDE,
+                           Phases=[NCA])
+
+    def test_unit_cell(self):
+        idx = 85
+        # self.map_.refine_mapping_data()
+        with self.map_.store() as store:
+            cellparams = store.cell_parameters[idx]
+        expected_a = 2.88 # From GSAS-II refinement
+        expected_c = 14.23 # From GSAS-II refinement
 
 
 class SlamFileTest(unittest.TestCase):
