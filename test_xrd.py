@@ -29,10 +29,12 @@ if __name__ == '__main__':
     matplotlib.use('Agg')
 from matplotlib import colors
 import numpy as np
+import h5py
 
-from scimap import exceptions
+from scimap import exceptions, gadds
 from peakfitting import PeakFit, remove_peak_from_df, discrete_fwhm
 from cases import ScimapTestCase
+from scimap.default_units import angstrom
 from xrd.lmo import CubicLMO
 from xrd.nca import NCA
 from xrd.unitcell import UnitCell, CubicUnitCell, HexagonalUnitCell
@@ -40,6 +42,8 @@ from xrd.reflection import Reflection, hkl_to_tuple
 from xrd.scan import XRDScan
 from mapping.coordinates import Cube
 from xrd.standards import Corundum, Aluminum
+from xrd.importers import import_gadds_map
+from xrd.utilities import q_to_twotheta, twotheta_to_q
 from xrd.peak import XRDPeak
 from xrd.locus import XRDLocus
 from xrd.map import XRDMap
@@ -79,6 +83,218 @@ class LMOMidV(CubicLMO):
 
 class LMOLowAngle(CubicLMO):
     diagnostic_hkl = '311'
+
+
+class QTwoThetaTest(ScimapTestCase):
+    """Test for proper conversion between scattering length (Q) and 2θ"""
+    wavelength = 1.5418
+    def test_twotheta_to_q(self):
+        # With units
+        q = twotheta_to_q(10, wavelength=angstrom(self.wavelength))
+        self.assertEqual(q, 0.71035890811831559)
+        # Without units
+        q = twotheta_to_q(10, wavelength=self.wavelength)
+        self.assertEqual(q, 0.71035890811831559)
+        # With numpy array
+        q = twotheta_to_q(np.array((10,)), wavelength=self.wavelength)
+        self.assertEqual(q[0], 0.71035890811831559)
+        # In radians
+        q = twotheta_to_q(np.radians(10), wavelength=self.wavelength,
+                          degrees=False)
+        self.assertEqual(q, 0.71035890811831559)
+
+    def test_q_to_twotheta(self):
+        # With units
+        twotheta = q_to_twotheta(0.71, wavelength=angstrom(self.wavelength))
+        self.assertEqual(twotheta, 9.9949346551020319)
+        # Without units
+        twotheta = q_to_twotheta(0.71, wavelength=self.wavelength)
+        self.assertEqual(twotheta, 9.9949346551020319)
+        # With numpy array
+        twotheta = q_to_twotheta(np.array((0.71,)), wavelength=self.wavelength)
+        self.assertEqual(twotheta[0], 9.9949346551020319)
+
+
+class GaddsTest(ScimapTestCase):
+    """Test how the software interacts with Bruker's GADDS control
+    systems, both importing and exporting."""
+    hdf_filename = "test_map_gadds.h5"
+    hdf_groupname = "test_map_gadds"
+    directory = 'test-data-xrd/xrd-map-gadds'
+
+    def tearDown(self):
+        try:
+            os.remove(self.hdf_filename)
+        except FileNotFoundError:
+            pass
+
+    def test_import_gadds_map(self):
+        import_gadds_map(directory=self.directory,
+                         hdf_filename=self.hdf_filename,
+                         hdf_groupname=self.hdf_groupname)
+        # Check that the hdf5 file was created
+        self.assertTrue(os.path.exists(self.hdf_filename))
+        # Check that intensities were saved
+        with h5py.File(self.hdf_filename) as f:
+            keys = list(f[self.hdf_groupname].keys())
+        self.assertIn("intensities", keys)
+        self.assertIn("scattering_lengths", keys)
+
+
+class SlamFileTest(ScimapTestCase):
+
+    def setUp(self):
+        # self.sample = XRDMap(center=(0, 0), diameter=12.7,
+        #                      hdf_filename=
+        #                   sample_name='slamfile-test',
+        #                   scan_time=5, qrange=(10, 20))
+        # self.sample.two_theta_range = (50, 90)
+        pass
+
+    def test_number_of_frames(self):
+        num_frames = gadds.number_of_frames(qrange=(0.71, 5.24), frame_step=20)
+        self.assertEqual(num_frames, 4)
+        # Check for values outside of limits
+        # self.sample.two_theta_range = (50, 200)
+        with self.assertRaises(ValueError):
+            gadds.number_of_frames(qrange=(2.45, 8.02), frame_step=20)
+
+    def test_rows(self):
+        # Does passing a resolution set the appropriate number of rows
+        self.sample = XRDMap(diameter=12.7, resolution=0.5)
+        self.assertEqual(
+            self.sample.rows,
+            18
+        )
+
+    def test_detector_start(self):
+        self.assertEqual(
+            gadds._detector_start(two_theta_range=(50, 90), frame_width=20),
+            10
+        )
+
+    def test_source_angle(self):
+        theta1 = gadds._source_angle(two_theta_range=(50, 90))
+        self.assertEqual(
+            theta1,
+            50
+        )
+        # Check for values outside the limits
+        with self.assertRaises(ValueError):
+            gadds._source_angle(two_theta_range=(-5, 50))
+        # Check for values outside theta1 max
+        theta1 = gadds._source_angle(two_theta_range = (60, 90))
+        self.assertEqual(theta1, 50)
+
+    @unittest.expectedFailure
+    def test_small_angles(self):
+        """
+        See what happens when the 2theta angle is close to the max X-ray
+        source angle.
+        """
+        self.sample.two_theta_range = (47.5, 62.5)
+        self.assertEqual(
+            self.sample.get_theta1(),
+            47.5
+        )
+        self.assertEqual(
+            self.sample.get_theta2_start(),
+            10
+        )
+
+    def test_path(self):
+        results_list = []
+        for coords in gadds._path(2):
+            results_list.append(coords)
+        self.assertEqual(
+            results_list,
+            [Cube(0, 0, 0),
+             Cube(1, 0, -1),
+             Cube(0, 1, -1),
+             Cube(-1, 1, 0),
+             Cube(-1, 0, 1),
+             Cube(0, -1, 1),
+             Cube(1, -1, 0)]
+        )
+
+    @unittest.expectedFailure
+    def test_coverage(self):
+        halfMap = XRDMap(collimator=2, coverage=0.25)
+        self.assertEqual(halfMap.unit_size, 2 * math.sqrt(3))
+
+    @unittest.expectedFailure
+    def test_cell_size(self):
+        unitMap = XRDMap(collimator=2)
+        self.assertEqual(unitMap.unit_size, math.sqrt(3))
+
+    def test_jinja_context(self):
+        # sample = XRDMap(center=(-10.5, 20.338),
+        #              diameter=10,
+        #              sample_name='LiMn2O4',
+        #              scan_time=10,
+        #              two_theta_range=(10, 20))
+        # sample.create_loci()
+        context = gadds._context(diameter=10, collimator=0.5,
+                                 coverage=1, scan_time=300,
+                                 number_of_frames=1,
+                                 two_theta_range=(10, 20),
+                                 frame_step=20,
+                                 detector_distance=19.93,
+                                 frame_size=1024, center=(-10.5, 20.338),
+                                 sample_name="hello, world",
+                                 hexadecimal=False)
+        self.assertEqual(
+            len(context['scans']),
+            631
+        )
+        self.assertApproximatelyEqual(
+            context['scans'][1]['x'],
+            0.2165
+        )
+        self.assertApproximatelyEqual(
+            context['scans'][1]['y'],
+            0.375
+        )
+        self.assertEqual(
+            context['scans'][3]['filename'],
+            'map-3'
+        )
+        self.assertEqual(
+            context['xoffset'],
+            -10.5
+        )
+        self.assertEqual(
+            context['yoffset'],
+            20.338
+        )
+        # Flood and spatial files to load
+        self.assertEqual(
+            context['flood_file'],
+            '1024_020._FL'
+        )
+        self.assertEqual(
+            context['spatial_file'],
+            '1024_020._ix'
+        )
+
+    def test_write_slamfile(self):
+        sample_name = "hello-world"
+        directory = '{}-frames'.format(sample_name)
+        # Check that the directory does not already exist
+        self.assertFalse(
+            os.path.exists(directory),
+            'Directory {} already exists, cannot test'.format(directory)
+        )
+        # Write the slamfile
+        gadds.write_gadds_script(quiet=True)
+        # Test if the correct things were created
+        self.assertTrue(os.path.exists(directory))
+        # Clean up
+        os.remove('{directory}/{filename}.slm'.format(
+            directory=directory,
+            filename=self.sample.sample_name)
+        )
+        os.rmdir(directory)
 
 
 class PeakTest(ScimapTestCase):
@@ -344,174 +560,6 @@ class Refinement34IDETest(ScimapTestCase):
             cellparams = store.cell_parameters[idx]
         expected_a = 2.88 # From GSAS-II refinement
         expected_c = 14.23 # From GSAS-II refinement
-
-
-class SlamFileTest(unittest.TestCase):
-
-    def setUp(self):
-        # self.sample = XRDMap(center=(0, 0), diameter=12.7,
-        #                      hdf_filename=
-        #                   sample_name='slamfile-test',
-        #                   scan_time=5, qrange=(10, 20))
-        # self.sample.two_theta_range = (50, 90)
-        pass
-
-    @unittest.expectedFailure
-    def test_number_of_frames(self):
-        self.assertEqual(
-            self.sample.get_number_of_frames(),
-            2
-        )
-        # Check for values outside of limits
-        self.sample.two_theta_range = (50, 200)
-        self.assertRaises(
-            ValueError,
-            self.sample.get_number_of_frames
-        )
-
-    @unittest.expectedFailure
-    def test_rows(self):
-        # Does passing a resolution set the appropriate number of rows
-        self.sample = XRDMap(diameter=12.7, resolution=0.5)
-        self.assertEqual(
-            self.sample.rows,
-            18
-        )
-
-    @unittest.expectedFailure
-    def test_theta2_start(self):
-        self.assertEqual(
-            self.sample.get_theta2_start(),
-            10
-        )
-
-    @unittest.expectedFailure
-    def test_theta1(self):
-        self.assertEqual(
-            self.sample.get_theta1(),
-            50
-        )
-        # Check for values outside the limits
-        self.sample.two_theta_range = (-5, 50)
-        self.assertRaises(
-            ValueError,
-            self.sample.get_theta1
-        )
-        # Check for values outside theta1 max
-        self.sample.two_theta_range = (60, 90)
-        self.assertEqual(
-            self.sample.get_theta1(),
-            50
-        )
-
-    @unittest.expectedFailure
-    def test_small_angles(self):
-        """
-        See what happens when the 2theta angle is close to the max X-ray
-        source angle.
-        """
-        self.sample.two_theta_range = (47.5, 62.5)
-        self.assertEqual(
-            self.sample.get_theta1(),
-            47.5
-        )
-        self.assertEqual(
-            self.sample.get_theta2_start(),
-            10
-        )
-
-    @unittest.expectedFailure
-    def test_path(self):
-        results_list = []
-        for coords in self.sample.path(2):
-            results_list.append(coords)
-        self.assertEqual(
-            results_list,
-            [Cube(0, 0, 0),
-             Cube(1, 0, -1),
-             Cube(0, 1, -1),
-             Cube(-1, 1, 0),
-             Cube(-1, 0, 1),
-             Cube(0, -1, 1),
-             Cube(1, -1, 0)]
-        )
-        self.sample.create_loci()
-        self.assertEqual(
-            self.sample.loci[8].cube_coords,
-            Cube(2, 0, -2)
-        )
-
-    @unittest.expectedFailure
-    def test_coverage(self):
-        halfMap = XRDMap(collimator=2, coverage=0.25)
-        self.assertEqual(halfMap.unit_size, 2 * math.sqrt(3))
-
-    @unittest.expectedFailure
-    def test_cell_size(self):
-        unitMap = XRDMap(collimator=2)
-        self.assertEqual(unitMap.unit_size, math.sqrt(3))
-
-    @unittest.expectedFailure
-    def test_jinja_context(self):
-        sample = XRDMap(center=(-10.5, 20.338),
-                     diameter=10,
-                     sample_name='LiMn2O4',
-                     scan_time=10,
-                     two_theta_range=(10, 20))
-        sample.create_loci()
-        context = sample.context()
-        self.assertEqual(
-            len(context['scans']),
-            len(sample.loci)
-        )
-        self.assertEqual(
-            context['scans'][1]['x'],
-            sample.loci[1].xy_coords(sample.unit_size)[0]
-        )
-        self.assertEqual(
-            context['scans'][1]['y'],
-            sample.loci[1].xy_coords(sample.unit_size)[1]
-        )
-        self.assertEqual(
-            context['scans'][3]['filename'],
-            'map-3'
-        )
-        self.assertEqual(
-            context['xoffset'],
-            -10.5
-        )
-        self.assertEqual(
-            context['yoffset'],
-            20.338
-        )
-        # Flood and spatial files to load
-        self.assertEqual(
-            context['flood_file'],
-            '1024_020._FL'
-        )
-        self.assertEqual(
-            context['spatial_file'],
-            '1024_020._ix'
-        )
-
-    @unittest.expectedFailure
-    def test_write_slamfile(self):
-        directory = '{}-frames'.format(self.sample.sample_name)
-        # Check that the directory does not already exist
-        self.assertFalse(
-            os.path.exists(directory),
-            'Directory {} already exists, cannot test'.format(directory)
-        )
-        # Write the slamfile
-        self.sample.write_script(quiet=True)
-        # Test if the correct things were created
-        self.assertTrue(os.path.exists(directory))
-        # Clean up
-        os.remove('{directory}/{filename}.slm'.format(
-            directory=directory,
-            filename=self.sample.sample_name)
-        )
-        os.rmdir(directory)
 
 
 class XRDScanTest(ScimapTestCase):
