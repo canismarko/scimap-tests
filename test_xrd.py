@@ -31,7 +31,7 @@ from matplotlib import colors
 import numpy as np
 import h5py
 
-from scimap import exceptions, gadds
+from scimap import exceptions, gadds, prog
 from peakfitting import PeakFit, remove_peak_from_df, discrete_fwhm
 from cases import ScimapTestCase
 from scimap.default_units import angstrom
@@ -50,6 +50,9 @@ from xrd.map import XRDMap
 from refinement import fullprof, native
 from mapping.locus import Locus, cached_property
 from xrd.adapters import BrukerRawFile, BrukerBrmlFile, BrukerXyeFile
+
+
+prog.quiet = True
 
 
 corundum_path = os.path.join(
@@ -143,29 +146,30 @@ class GaddsTest(ScimapTestCase):
 
 class SlamFileTest(ScimapTestCase):
 
-    def setUp(self):
-        # self.sample = XRDMap(center=(0, 0), diameter=12.7,
-        #                      hdf_filename=
-        #                   sample_name='slamfile-test',
-        #                   scan_time=5, qrange=(10, 20))
-        # self.sample.two_theta_range = (50, 90)
-        pass
+    def tearDown(self):
+        try:
+            os.remove('xrd-map-gadds-frames/xrd-map-gadds.slm')
+        except FileNotFoundError:
+            pass
+        try:
+            os.rmdir('xrd-map-gadds-frames')
+        except FileNotFoundError:
+            pass
 
     def test_number_of_frames(self):
-        num_frames = gadds.number_of_frames(qrange=(0.71, 5.24), frame_step=20)
+        num_frames = gadds._number_of_frames(two_theta_range=(10, 80), frame_step=20)
         self.assertEqual(num_frames, 4)
         # Check for values outside of limits
-        # self.sample.two_theta_range = (50, 200)
         with self.assertRaises(ValueError):
-            gadds.number_of_frames(qrange=(2.45, 8.02), frame_step=20)
+            gadds._number_of_frames(two_theta_range=(60, 180), frame_step=20)
 
-    def test_rows(self):
+    # def test_rows(self):
         # Does passing a resolution set the appropriate number of rows
-        self.sample = XRDMap(diameter=12.7, resolution=0.5)
-        self.assertEqual(
-            self.sample.rows,
-            18
-        )
+        # self.sample = XRDMap(diameter=12.7, resolution=0.5, qrange)
+        # self.assertEqual(
+        #     self.sample.rows,
+        #     18
+        # )
 
     def test_detector_start(self):
         self.assertEqual(
@@ -228,20 +232,12 @@ class SlamFileTest(ScimapTestCase):
         self.assertEqual(unitMap.unit_size, math.sqrt(3))
 
     def test_jinja_context(self):
-        # sample = XRDMap(center=(-10.5, 20.338),
-        #              diameter=10,
-        #              sample_name='LiMn2O4',
-        #              scan_time=10,
-        #              two_theta_range=(10, 20))
-        # sample.create_loci()
         context = gadds._context(diameter=10, collimator=0.5,
                                  coverage=1, scan_time=300,
-                                 number_of_frames=1,
                                  two_theta_range=(10, 20),
-                                 frame_step=20,
-                                 detector_distance=19.93,
+                                 detector_distance=20,
                                  frame_size=1024, center=(-10.5, 20.338),
-                                 sample_name="hello, world",
+                                 sample_name="xrd-map-gadds",
                                  hexadecimal=False)
         self.assertEqual(
             len(context['scans']),
@@ -278,23 +274,33 @@ class SlamFileTest(ScimapTestCase):
         )
 
     def test_write_slamfile(self):
-        sample_name = "hello-world"
+        sample_name = "xrd-map-gadds"
         directory = '{}-frames'.format(sample_name)
+        hdf_filename = "test-data-xrd/{}.h5".format(sample_name)
         # Check that the directory does not already exist
         self.assertFalse(
             os.path.exists(directory),
             'Directory {} already exists, cannot test'.format(directory)
         )
         # Write the slamfile
-        gadds.write_gadds_script(quiet=True)
+        gadds.write_gadds_script(quiet=True, qrange=(1, 2),
+                                 sample_name=sample_name,
+                                 center=(0, 0), hdf_filename=hdf_filename)
         # Test if the correct things were created
         self.assertTrue(os.path.exists(directory))
-        # Clean up
-        os.remove('{directory}/{filename}.slm'.format(
-            directory=directory,
-            filename=self.sample.sample_name)
-        )
-        os.rmdir(directory)
+        slamfile = os.path.join(directory, sample_name + ".slm")
+        self.assertTrue(os.path.exists(directory))
+        # Test that the HDF5 file was created to eventually hold the results
+        self.assertTrue(os.path.exists(hdf_filename))
+        with h5py.File(hdf_filename) as f:
+            keys = list(f[sample_name].keys())
+            self.assertIn('positions', keys)
+            layout = f[sample_name]['positions'].attrs['layout']
+            self.assertEqual(layout, 'hex')
+            self.assertIn('file_basenames', keys)
+            wavelength = f[sample_name]['wavelength']
+            self.assertEqual(wavelength[0], 1.5406)
+            self.assertEqual(wavelength[1], 1.5444)
 
 
 class PeakTest(ScimapTestCase):
